@@ -12,9 +12,10 @@ COPY config ./config
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir '.[dashboard,live]' \
+    && pip install --no-cache-dir -e '.[dashboard,live]' \
     && chmod +x /docker-entrypoint.sh \
-    && mkdir -p /data
+    && mkdir -p /data \
+    && python -c "from pathlib import Path; from arbot.dashboard.app import app; p = Path(app.template_folder) / 'index.html'; assert p.is_file(), p"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

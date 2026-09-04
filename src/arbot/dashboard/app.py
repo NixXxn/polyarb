@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from functools import wraps
 from pathlib import Path
@@ -16,11 +17,23 @@ from arbot.dashboard.data import (
 )
 from arbot.mode import load_dotenv_file
 
+log = logging.getLogger("arbot.dashboard")
+
 app = Flask(__name__, template_folder=str(Path(__file__).parent / "templates"))
 
 DASHBOARD_USER = os.getenv("DASHBOARD_USER", "admin")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
-PORT = int(os.getenv("PORT", "8788"))
+
+
+def _env_port() -> int:
+    raw = (os.getenv("PORT") or "8788").strip().split("/", 1)[0]
+    try:
+        return int(raw)
+    except ValueError:
+        return 8788
+
+
+PORT = _env_port()
 
 
 def _check_auth(username: str, password: str) -> bool:
@@ -48,6 +61,20 @@ def requires_auth(fn):
         return fn(*args, **kwargs)
 
     return decorated
+
+
+@app.errorhandler(Exception)
+def _unhandled(exc: Exception):
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        return exc
+    log.exception("dashboard request failed")
+    return (
+        f"Dashboard error: {exc.__class__.__name__}: {exc}\n",
+        500,
+        {"Content-Type": "text/plain; charset=utf-8"},
+    )
 
 
 @app.route("/")

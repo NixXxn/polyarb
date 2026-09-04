@@ -29,3 +29,19 @@ def test_analyze_import():
     from arbot.strategy import analyze_arbitrage, arbitrage_exits
     assert callable(analyze_arbitrage)
     assert callable(arbitrage_exits)
+
+
+def test_dashboard_index_renders():
+    from pathlib import Path
+
+    from arbot.dashboard.app import app
+
+    template = Path(app.template_folder) / "index.html"
+    assert template.is_file(), template
+    client = app.test_client()
+    response = client.get("/")
+    assert response.status_code == 200
+    assert b"Arbot" in response.data
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.get_json()["ok"] is True
