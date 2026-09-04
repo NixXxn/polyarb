@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,15 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SETTINGS_PATH = ROOT / "config" / "settings.yaml"
+
+
+def resolve_settings_path(path: Path | None = None) -> Path:
+    if path is not None:
+        return Path(path)
+    raw = os.environ.get("ARBOT_SETTINGS_PATH", "").strip()
+    if raw:
+        return Path(raw)
+    return DEFAULT_SETTINGS_PATH
 
 # Keys editable from the dashboard (written back into settings.yaml).
 EDITABLE_ARBITRAGE_KEYS = (
@@ -155,7 +165,7 @@ def _arb_from_raw(raw: dict[str, Any]) -> ArbitrageSettings:
 
 
 def load_settings(path: Path | None = None) -> Settings:
-    settings_path = Path(path) if path else DEFAULT_SETTINGS_PATH
+    settings_path = resolve_settings_path(path)
     raw = _load_yaml(settings_path)
     live_raw = raw.get("live") or {}
     return Settings(
@@ -198,7 +208,7 @@ def settings_public_dict(settings: Settings) -> dict[str, Any]:
 
 def update_settings(updates: dict[str, Any], path: Path | None = None) -> Settings:
     """Merge dashboard updates into settings.yaml and reload."""
-    settings_path = Path(path) if path else DEFAULT_SETTINGS_PATH
+    settings_path = resolve_settings_path(path)
     raw = _load_yaml(settings_path)
     if not isinstance(raw, dict):
         raw = {}

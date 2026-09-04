@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import click
@@ -234,17 +235,19 @@ def reset_balances_cmd(balance: float | None, data_dir: Path | None, cli_mode: s
 
 
 @main.command("dashboard")
-@click.option("--host", default="127.0.0.1", show_default=True)
-@click.option("--port", default=8788, show_default=True, type=int)
-def dashboard_cmd(host: str, port: int) -> None:
+@click.option("--host", default=None, help="Bind address (default 127.0.0.1, or HOST env).")
+@click.option("--port", default=None, type=int, help="Port (default 8788, or PORT env).")
+def dashboard_cmd(host: str | None, port: int | None) -> None:
     try:
         from arbot.dashboard.app import run_dashboard
     except ImportError as e:
         raise click.ClickException(
             "Dashboard needs Flask. Install with: pip install -e '.[dashboard]'"
         ) from e
-    click.echo(f"Dashboard http://{host}:{port}")
-    run_dashboard(host=host, port=port)
+    bind_host = host or os.environ.get("HOST") or "127.0.0.1"
+    bind_port = port if port is not None else int(os.environ.get("PORT") or "8788")
+    click.echo(f"Dashboard http://{bind_host}:{bind_port}")
+    run_dashboard(host=bind_host, port=bind_port)
 
 
 if __name__ == "__main__":
