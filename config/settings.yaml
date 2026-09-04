@@ -1,0 +1,41 @@
+# Polymarket arbitrage-only bot
+mode: paper
+poll_interval_seconds: 30
+starting_balance: 1000
+min_position_usd: 2
+user_agent: polymarket-arb/0.1
+
+arbitrage:
+  starting_balance: 1000
+  max_pair_cost: 0.97
+  max_maker_ask_sum: 1.04
+  min_edge: 0.025
+  fee_buffer: 0.01
+  min_liquidity: 400
+  min_volume_24h: 150
+  min_ask: 0.02
+  max_ask: 0.95
+  min_ask_size: 3
+  position_usd: 40
+  max_position_usd: 100
+  max_open_pairs: 8
+  maker_tick: 0.01
+  paper_fak: true
+  prefer_crypto_weather: true
+  prefer_lp_rewards: true
+  scan_limit: 250
+  exit_ladder_prices: [0.50, 0.70, 0.85, 0.95]
+  exit_ladder_fraction: 0.25
+  lose_leg_bid_max: 0.35
+  lose_leg_bid_min: 0.05
+  lose_leg_lead_bid: 0.55
+  rebalance_enabled: true
+  rebalance_move: 0.04
+  rebalance_fraction: 0.10
+  rebalance_min_lead: 0.55
+
+live:
+  clob_host: https://clob.polymarket.com
+  chain_id: 137
+  signature_type: 1
+  funder: ""

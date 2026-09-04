@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=78.1.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-arb"
+version = "0.1.0"
+description = "Streamlined Polymarket two-leg arbitrage bot (paper + live) with dashboard settings."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "httpx>=0.27",
+    "polymarket-paper-trader>=0.1.7",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+dashboard = ["flask>=3.0", "gunicorn>=22.0"]
+live = ["py-clob-client-v2>=1.0"]
+
+[project.scripts]
+arbot = "arbot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
