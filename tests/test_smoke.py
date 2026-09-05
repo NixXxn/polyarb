@@ -42,6 +42,8 @@ def test_dashboard_index_renders():
     response = client.get("/")
     assert response.status_code == 200
     assert b"Arbot" in response.data
+    assert b"Times in UTC" in response.data
+    assert b"When (UTC)" in response.data
     health = client.get("/health")
     assert health.status_code == 200
     assert health.get_json()["ok"] is True

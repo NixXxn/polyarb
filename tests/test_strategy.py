@@ -50,6 +50,40 @@ def test_analyze_arbitrage_emits_paired_legs(monkeypatch, tmp_path):
     assert all(s.order_type == "fak" for s in sigs)
 
 
+def test_analyze_arbitrage_skip_reason_includes_reject_counts(monkeypatch, tmp_path):
+    settings = load_settings()
+    engine = MagicMock()
+    engine.db.data_dir = tmp_path
+    engine.db.get_open_positions.return_value = []
+    engine.get_account.return_value = SimpleNamespace(cash=1000.0)
+
+    market = _ArbMarket(
+        condition_id="0xdead",
+        slug="will-eth-hit-10k",
+        question="Will Ethereum hit 10k?",
+        outcome_a="Yes",
+        outcome_b="No",
+        liquidity=5000,
+        volume_24h=20000,
+        lp_reward_score=0.0,
+        preferred=False,
+    )
+
+    import arbot.strategy as arb_mod
+
+    monkeypatch.setattr(arb_mod, "discover_arb_markets", lambda *_a, **_k: [market, market])
+    monkeypatch.setattr(arb_mod, "_quote_pair", lambda *_a, **_k: None)
+
+    assert analyze_arbitrage(engine, settings, paper_mode=True) == []
+    from arbot.decision_log import load_decisions
+
+    skips = [row for row in load_decisions(tmp_path) if row.get("decision") == "skip"]
+    assert skips
+    assert skips[0]["reason"].startswith("no_arb_window:")
+    assert "2× no usable two-leg book" in skips[0]["reason"]
+    assert skips[0]["skip_summary"] == "2× no usable two-leg book"
+
+
 def test_arbitrage_exits_lose_leg(monkeypatch, tmp_path):
     settings = load_settings()
     engine = MagicMock()

@@ -22,7 +22,7 @@ from pm_trader.engine import Engine
 from pm_trader.models import Position
 
 from arbot.config import Settings
-from arbot.decision_log import log_decision
+from arbot.decision_log import format_skip_summary, log_decision
 from arbot.markets import best_ask, best_bid
 from arbot.signals import QuantMeta, Signal
 from arbot.sizing import account_cash, scaled_size
@@ -500,10 +500,12 @@ def analyze_arbitrage(
         )
 
     if not signals and rejects:
+        summary = format_skip_summary(dict(rejects))
         _log_arb(
             engine,
             decision="skip",
-            reason="no_arb_window",
+            reason=f"no_arb_window: {summary}" if summary else "no_arb_window",
+            skip_summary=summary or None,
             rejects=dict(rejects),
             markets_scanned=len(markets),
         )

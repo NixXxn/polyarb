@@ -76,6 +76,7 @@
     <div>
       <h1>Arbot</h1>
       <div class="sub">Two-leg spread capture · paper &amp; live</div>
+      <div class="sub" id="tzNote">Times in UTC</div>
       <div class="sub" id="meta">Loading…</div>
     </div>
     <div class="row">
@@ -108,18 +109,40 @@
 
     <section class="panel">
       <div class="label">Recent trades</div>
-      <div style="overflow:auto"><table id="trades"><thead><tr><th>When</th><th>Side</th><th>Outcome</th><th>Price</th><th>USD</th><th>Market</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow:auto"><table id="trades"><thead><tr><th>When (UTC)</th><th>Side</th><th>Outcome</th><th>Price</th><th>USD</th><th>Market</th></tr></thead><tbody></tbody></table></div>
     </section>
 
     <section class="panel">
       <div class="label">Activity</div>
-      <div style="overflow:auto"><table id="activity"><thead><tr><th>When</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow:auto"><table id="activity"><thead><tr><th>When (UTC)</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div>
     </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
     const money = (n) => (n == null || Number.isNaN(n)) ? "—" : `$${Number(n).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
     const pct = (n) => (n == null || Number.isNaN(n)) ? "—" : `${(Number(n)*100).toFixed(1)}%`;
+
+    function parseUtcDate(value) {
+      if (value == null || value === "") return null;
+      const raw = String(value).trim();
+      if (!raw) return null;
+      const stripped = raw.replace(/\s+UTC$/i, "");
+      const hasZone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(stripped);
+      const iso = stripped.includes("T") ? stripped : stripped.replace(" ", "T");
+      const parsed = new Date(hasZone ? iso : iso + "Z");
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function fmtUtc(value) {
+      if (value == null || value === "") return "—";
+      const dt = parseUtcDate(value);
+      if (!dt) return String(value);
+      const pad = (n) => String(n).padStart(2, "0");
+      return (
+        `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} ` +
+        `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())} UTC`
+      );
+    }
 
     const FIELD_DEFS = [
       { path: "mode", label: "Mode", type: "select", options: ["paper","live"], group: "top" },
@@ -225,7 +248,9 @@
       const res = await fetch(`/api/dashboard?mode=${encodeURIComponent(mode)}`);
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "load failed");
-      $("meta").innerHTML = `<span class="pill">${data.mode}</span> · ${data.data_dir}`;
+      const tz = data.timezone || "UTC";
+      $("tzNote").textContent = `Times in ${tz}`;
+      $("meta").innerHTML = `<span class="pill">${data.mode}</span> · ${data.data_dir} · ${tz}`;
       const p = data.portfolio;
       $("stats").innerHTML = [
         ["Cash", money(p.cash)],
@@ -249,14 +274,14 @@
 
       const ttb = $("trades").querySelector("tbody");
       ttb.innerHTML = (data.trades||[]).slice(0,40).map(r => `<tr>
-        <td>${r.created_at||""}</td><td>${r.side}</td><td>${r.outcome}</td>
+        <td>${fmtUtc(r.created_at)}</td><td>${r.side}</td><td>${r.outcome}</td>
         <td>${Number(r.avg_price).toFixed(3)}</td><td>${money(r.amount_usd)}</td>
         <td><a href="${r.url}" target="_blank" rel="noreferrer">${r.market_slug}</a></td>
       </tr>`).join("") || `<tr><td colspan="6" class="sub">No trades yet</td></tr>`;
 
       const atb = $("activity").querySelector("tbody");
       atb.innerHTML = (data.activity||[]).slice(0,30).map(r => `<tr>
-        <td>${r.ts||r.created_at||""}</td><td>${r.event||""}</td><td>${r.message||""}</td>
+        <td>${fmtUtc(r.ts||r.created_at)}</td><td>${r.event||""}</td><td>${r.message||""}</td>
       </tr>`).join("") || `<tr><td colspan="3" class="sub">Quiet</td></tr>`;
 
       renderSettings(data.settings || {});

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,45 @@ from arbot.paths import data_dir_from_env
 from arbot.report import account_stats, combine_engines
 from arbot.scan_history import load_scan_history
 from arbot.trade_log import build_activity_feed, load_skipped_trades
+
+DISPLAY_TIMEZONE = "UTC"
+
+
+def format_dashboard_ts(value: Any) -> str:
+    """Format stored timestamps for the dashboard as explicit UTC.
+
+    Activity/decision/scan logs write ``datetime.now(timezone.utc).isoformat()``.
+    Ledger ``created_at`` values are typically naive UTC. Naive datetimes are
+    treated as UTC so browsers do not shift them to the viewer's local zone.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+        if text.endswith(" UTC"):
+            return text
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _stamp_row(row: dict[str, Any], *keys: str) -> dict[str, Any]:
+    out = dict(row)
+    for key in keys:
+        if key in out and out[key] is not None:
+            out[key] = format_dashboard_ts(out[key])
+    return out
+
 
 _RESET_STATS_FILES = (
     "activity.jsonl",
@@ -156,27 +196,34 @@ def fetch_dashboard(
                 }
             )
         trade_rows = [
-            {
-                "id": t.id,
-                "strategy": STRATEGY,
-                "side": t.side,
-                "market_slug": t.market_slug,
-                "market_question": t.market_question,
-                "outcome": t.outcome,
-                "avg_price": t.avg_price,
-                "amount_usd": t.amount_usd,
-                "shares": t.shares,
-                "fee": t.fee,
-                "order_type": t.order_type,
-                "created_at": t.created_at,
-                "url": polymarket_event_url(t.market_slug),
-            }
+            _stamp_row(
+                {
+                    "id": t.id,
+                    "strategy": STRATEGY,
+                    "side": t.side,
+                    "market_slug": t.market_slug,
+                    "market_question": t.market_question,
+                    "outcome": t.outcome,
+                    "avg_price": t.avg_price,
+                    "amount_usd": t.amount_usd,
+                    "shares": t.shares,
+                    "fee": t.fee,
+                    "order_type": t.order_type,
+                    "created_at": t.created_at,
+                    "url": polymarket_event_url(t.market_slug),
+                },
+                "created_at",
+            )
             for t in trades
         ]
+        live_sync = load_live_sync_meta(resolved.data_dir) if resolved.is_live else None
+        if live_sync:
+            live_sync = _stamp_row(live_sync, "last_sync")
         return {
             "ok": True,
             "mode": resolved.mode,
             "data_dir": str(resolved.data_dir),
+            "timezone": DISPLAY_TIMEZONE,
             "settings": settings_public_dict(settings),
             "portfolio": {
                 "cash": combined.cash,
@@ -204,12 +251,23 @@ def fetch_dashboard(
             },
             "positions": positions,
             "trades": trade_rows,
-            "activity": build_activity_feed(resolved.data_dir, limit=80),
-            "decisions": load_decisions(resolved.data_dir, limit=80),
-            "skipped": load_skipped_trades(resolved.data_dir, limit=40),
-            "scan_history": load_scan_history(resolved.data_dir, limit=60),
+            "activity": [
+                _stamp_row(row, "ts", "created_at")
+                for row in build_activity_feed(resolved.data_dir, limit=80)
+            ],
+            "decisions": [
+                _stamp_row(row, "ts") for row in load_decisions(resolved.data_dir, limit=80)
+            ],
+            "skipped": [
+                _stamp_row(row, "ts")
+                for row in load_skipped_trades(resolved.data_dir, limit=40)
+            ],
+            "scan_history": [
+                _stamp_row(row, "ts")
+                for row in load_scan_history(resolved.data_dir, limit=60)
+            ],
             "live_orders": load_live_open_orders(resolved.data_dir) if resolved.is_live else [],
-            "live_sync": load_live_sync_meta(resolved.data_dir) if resolved.is_live else None,
+            "live_sync": live_sync,
         }
     finally:
         engine.close()
