@@ -39,6 +39,7 @@ EDITABLE_ARBITRAGE_KEYS = (
     "prefer_crypto_weather",
     "prefer_lp_rewards",
     "scan_limit",
+    "max_horizon_hours",
     "exit_ladder_prices",
     "exit_ladder_fraction",
     "lose_leg_bid_max",
@@ -86,6 +87,7 @@ class ArbitrageSettings:
     prefer_crypto_weather: bool
     prefer_lp_rewards: bool
     scan_limit: int
+    max_horizon_hours: int
     starting_balance: float | None
     exit_ladder_prices: tuple[float, ...]
     exit_ladder_fraction: float
@@ -149,6 +151,7 @@ def _arb_from_raw(raw: dict[str, Any]) -> ArbitrageSettings:
         prefer_crypto_weather=bool(raw.get("prefer_crypto_weather", True)),
         prefer_lp_rewards=bool(raw.get("prefer_lp_rewards", True)),
         scan_limit=int(raw.get("scan_limit", 250)),
+        max_horizon_hours=int(raw.get("max_horizon_hours", 24)),
         starting_balance=(
             float(raw["starting_balance"]) if raw.get("starting_balance") is not None else None
         ),

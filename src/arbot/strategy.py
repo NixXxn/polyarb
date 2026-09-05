@@ -14,6 +14,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -71,6 +72,7 @@ class _ArbMarket:
     volume_24h: float
     lp_reward_score: float
     preferred: bool
+    hours_to_end: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,25 @@ def _is_preferred(slug: str, question: str) -> bool:
 def _should_skip(slug: str, question: str) -> bool:
     blob = f"{slug} {question}".lower()
     return any(m in blob for m in _SKIP_MARKERS)
+
+
+def _hours_until_end(market: dict[str, Any]) -> float | None:
+    raw = market.get("endDate") or market.get("endDateIso") or market.get("end_date")
+    if raw is None or raw == "":
+        return None
+    try:
+        if isinstance(raw, (int, float)):
+            ts = float(raw)
+            if ts > 1e12:
+                ts /= 1000.0
+            end = datetime.fromtimestamp(ts, tz=timezone.utc)
+        else:
+            end = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+    return (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
 
 
 def _lp_reward_score(market: dict[str, Any]) -> float:
@@ -163,7 +184,7 @@ def discover_arb_markets(
     *,
     limit: int | None = None,
 ) -> list[_ArbMarket]:
-    """Fetch active binary markets; prefer crypto/weather + LP-rewarded books."""
+    """Fetch active binary markets; keep only those that resolve inside max_horizon_hours."""
     cfg = settings.arbitrage
     lim = int(limit if limit is not None else cfg.scan_limit)
     try:
@@ -204,6 +225,10 @@ def discover_arb_markets(
                 # Keep some non-preferred depth for pure arb, but require more volume.
                 if vol < cfg.min_volume_24h * 5:
                     continue
+            hours = _hours_until_end(m)
+            if cfg.max_horizon_hours > 0:
+                if hours is None or hours < 0 or hours > cfg.max_horizon_hours:
+                    continue
             out.append(
                 _ArbMarket(
                     condition_id=str(m.get("conditionId") or ""),
@@ -215,14 +240,18 @@ def discover_arb_markets(
                     volume_24h=vol,
                     lp_reward_score=_lp_reward_score(m),
                     preferred=preferred,
+                    hours_to_end=hours,
                 )
             )
         except Exception:
             continue
 
     def _rank(row: _ArbMarket) -> tuple:
+        # Soonest resolution first, then volume. Fast books recycle capital.
+        horizon_key = -(row.hours_to_end if row.hours_to_end is not None else 1e9)
         reward = row.lp_reward_score if cfg.prefer_lp_rewards else 0.0
         return (
+            horizon_key,
             1 if row.preferred else 0,
             reward,
             row.volume_24h,

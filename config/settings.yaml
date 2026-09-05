@@ -1,29 +1,31 @@
 # Polymarket arbitrage-only bot
+# Unconstrained backtest row: 5¢ pair cap, no fee buffer, $80×16, ≤24h to resolution.
 mode: paper
-poll_interval_seconds: 30
+poll_interval_seconds: 15
 starting_balance: 1000
 min_position_usd: 2
 user_agent: polymarket-arb/0.1
 
 arbitrage:
   starting_balance: 1000
-  max_pair_cost: 0.97
-  max_maker_ask_sum: 1.04
-  min_edge: 0.025
-  fee_buffer: 0.01
+  max_pair_cost: 0.95
+  max_maker_ask_sum: 0.99
+  min_edge: 0.05
+  fee_buffer: 0.0
   min_liquidity: 400
   min_volume_24h: 150
   min_ask: 0.02
   max_ask: 0.95
-  min_ask_size: 3
-  position_usd: 40
-  max_position_usd: 100
-  max_open_pairs: 8
+  min_ask_size: 5
+  position_usd: 80
+  max_position_usd: 80
+  max_open_pairs: 16
   maker_tick: 0.01
   paper_fak: true
-  prefer_crypto_weather: true
-  prefer_lp_rewards: true
-  scan_limit: 250
+  prefer_crypto_weather: false
+  prefer_lp_rewards: false
+  scan_limit: 500
+  max_horizon_hours: 24
   exit_ladder_prices: [0.50, 0.70, 0.85, 0.95]
   exit_ladder_fraction: 0.25
   lose_leg_bid_max: 0.35
