@@ -35,7 +35,8 @@ _GAMMA_PAGE_SIZE = 100
 _MAX_MARKETS_TO_QUOTE = 100
 # Fast Up/Down books usually sit just over $1 combined; still rest maker bids under.
 _MAKER_QUOTE_MAX_ASK = 0.99
-_MAKER_QUOTE_MAX_SUM = 1.08
+_MAKER_QUOTE_MAX_SUM = 1.02
+_FAST_SLUG_MARKERS = ("-5m-", "-15m-", "-5min", "-15min")
 
 # Prefer fast-moving crypto + weather; still allow other binary markets at lower rank.
 _PREFERRED_MARKERS = (
@@ -116,6 +117,27 @@ def _is_preferred(slug: str, question: str) -> bool:
 def _should_skip(slug: str, question: str) -> bool:
     blob = f"{slug} {question}".lower()
     return any(m in blob for m in _SKIP_MARKERS)
+
+
+def _is_fast_market(market: _ArbMarket) -> bool:
+    slug = market.slug.lower()
+    if any(m in slug for m in _FAST_SLUG_MARKERS):
+        return True
+    if market.hours_to_end is None:
+        return True
+    return False
+
+
+def _maker_allowed(market: _ArbMarket, cfg: Any) -> bool:
+    """Rest bids only on slower, preferred books — 5m tape is adverse-selection junk."""
+    if not (market.preferred or market.lp_reward_score > 0):
+        return False
+    if _is_fast_market(market):
+        return False
+    min_hours = float(getattr(cfg, "maker_min_horizon_hours", 1.0) or 0.0)
+    if market.hours_to_end is None or market.hours_to_end < min_hours:
+        return False
+    return True
 
 
 def _hours_until_end(market: dict[str, Any]) -> float | None:
@@ -342,11 +364,14 @@ def _quote_pair(
     settings: Settings,
 ) -> tuple[_ArbQuote | None, str | None]:
     cfg = settings.arbitrage
-    maker_book = bool(market.preferred or market.lp_reward_score > 0)
-    quote_max_ask = _MAKER_QUOTE_MAX_ASK if maker_book else cfg.max_ask
-    quote_max_sum = (
-        max(cfg.max_maker_ask_sum, _MAKER_QUOTE_MAX_SUM) if maker_book else cfg.max_maker_ask_sum
-    )
+    maker_book = _maker_allowed(market, cfg)
+    if maker_book:
+        quote_max_ask = _MAKER_QUOTE_MAX_ASK
+        quote_max_sum = max(cfg.max_maker_ask_sum, _MAKER_QUOTE_MAX_SUM)
+    else:
+        # Taker-only: require a live lock under the pair cap. Do not rest under a $1.02 5m book.
+        quote_max_ask = cfg.max_ask
+        quote_max_sum = cfg.max_pair_cost
     try:
         full = engine.api.get_market(market.slug)
         token_a = full.get_token_id(market.outcome_a)
@@ -491,9 +516,15 @@ def analyze_arbitrage(
             if (1.0 - (limit_a + limit_b)) < cfg.min_edge:
                 rejects["edge_too_small"] += 1
                 continue
-            # Prefer maker on crypto/weather/LP; skip dull general books without taker edge.
-            if not taker_ok and not (market.preferred or market.lp_reward_score > 0):
-                rejects["not_preferred_maker"] += 1
+            if not taker_ok and not _maker_allowed(market, cfg):
+                rejects["maker_too_fast" if (market.preferred or market.lp_reward_score > 0) else "not_preferred_maker"] += 1
+                continue
+            bal_lo = float(cfg.maker_balanced_min)
+            bal_hi = float(cfg.maker_balanced_max)
+            if not taker_ok and not (
+                bal_lo <= quote.ask_a <= bal_hi and bal_lo <= quote.ask_b <= bal_hi
+            ):
+                rejects["book_unbalanced"] += 1
                 continue
             order_type = "limit"
             pair_ref = limit_a + limit_b

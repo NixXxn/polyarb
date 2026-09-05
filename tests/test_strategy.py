@@ -96,7 +96,7 @@ def test_preferred_maker_rests_when_asks_sum_over_dollar(monkeypatch, tmp_path):
 
     market = _ArbMarket(
         condition_id="0xup",
-        slug="btc-updown-5m-1",
+        slug="btc-up-or-down-august-6am-et",
         question="Bitcoin Up or Down?",
         outcome_a="Up",
         outcome_b="Down",
@@ -104,7 +104,7 @@ def test_preferred_maker_rests_when_asks_sum_over_dollar(monkeypatch, tmp_path):
         volume_24h=500,
         lp_reward_score=0.0,
         preferred=True,
-        hours_to_end=0.08,
+        hours_to_end=6.0,
     )
 
     import arbot.strategy as arb_mod
@@ -125,6 +125,44 @@ def test_preferred_maker_rests_when_asks_sum_over_dollar(monkeypatch, tmp_path):
     assert all(s.order_type == "limit" for s in sigs)
     assert all(not s.paper_fill_at_limit for s in sigs)
     assert round(sum(s.limit_price or 0 for s in sigs), 4) <= settings.arbitrage.max_pair_cost + 1e-9
+
+
+def test_fast_5m_does_not_rest_maker_on_dollar_book(monkeypatch, tmp_path):
+    settings = load_settings()
+    engine = MagicMock()
+    engine.db.data_dir = tmp_path
+    engine.db.get_open_positions.return_value = []
+    engine.get_account.return_value = SimpleNamespace(cash=1000.0)
+    market = _ArbMarket(
+        condition_id="0x5m",
+        slug="btc-updown-5m-1",
+        question="Bitcoin Up or Down?",
+        outcome_a="Up",
+        outcome_b="Down",
+        liquidity=8000,
+        volume_24h=500,
+        lp_reward_score=0.0,
+        preferred=True,
+        hours_to_end=0.08,
+    )
+    import arbot.strategy as arb_mod
+
+    monkeypatch.setattr(arb_mod, "discover_arb_markets", lambda *_a, **_k: [market])
+    full = MagicMock()
+    full.get_token_id.side_effect = lambda o: f"tok-{o.lower()}"
+    engine.api.get_market.return_value = full
+    engine.api.get_order_book.side_effect = lambda token: (
+        SimpleNamespace(asks=[FakeLevel(0.52, 80)], bids=[FakeLevel(0.51, 80)])
+        if "up" in token
+        else SimpleNamespace(asks=[FakeLevel(0.50, 80)], bids=[FakeLevel(0.49, 80)])
+    )
+    assert analyze_arbitrage(engine, settings, paper_mode=True) == []
+    from arbot.decision_log import load_decisions
+
+    skips = [row for row in load_decisions(tmp_path) if row.get("decision") == "skip"]
+    assert skips
+    assert "combined asks above maker cap" in skips[0]["reason"]
+
 
 
 

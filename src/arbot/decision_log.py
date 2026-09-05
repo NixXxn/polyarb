@@ -164,6 +164,8 @@ REJECT_LABELS: dict[str, str] = {
     "limit_sum_too_high": "limit sum above pair cap",
     "edge_too_small": "edge too small",
     "not_preferred_maker": "maker skipped (not crypto/wx/LP)",
+    "maker_too_fast": "maker skipped (resolves too soon)",
+    "book_unbalanced": "book too one-sided for maker",
     "size_too_small": "size too small",
     "book_error": "order book fetch failed",
     "no_ask": "no ask on one or both legs",

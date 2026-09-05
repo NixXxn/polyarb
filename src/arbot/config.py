@@ -40,6 +40,9 @@ EDITABLE_ARBITRAGE_KEYS = (
     "prefer_lp_rewards",
     "scan_limit",
     "max_horizon_hours",
+    "maker_min_horizon_hours",
+    "maker_balanced_min",
+    "maker_balanced_max",
     "exit_ladder_prices",
     "exit_ladder_fraction",
     "lose_leg_bid_max",
@@ -88,6 +91,9 @@ class ArbitrageSettings:
     prefer_lp_rewards: bool
     scan_limit: int
     max_horizon_hours: int
+    maker_min_horizon_hours: float
+    maker_balanced_min: float
+    maker_balanced_max: float
     starting_balance: float | None
     exit_ladder_prices: tuple[float, ...]
     exit_ladder_fraction: float
@@ -152,6 +158,9 @@ def _arb_from_raw(raw: dict[str, Any]) -> ArbitrageSettings:
         prefer_lp_rewards=bool(raw.get("prefer_lp_rewards", True)),
         scan_limit=int(raw.get("scan_limit", 250)),
         max_horizon_hours=int(raw.get("max_horizon_hours", 24)),
+        maker_min_horizon_hours=float(raw.get("maker_min_horizon_hours", 1.0)),
+        maker_balanced_min=float(raw.get("maker_balanced_min", 0.35)),
+        maker_balanced_max=float(raw.get("maker_balanced_max", 0.65)),
         starting_balance=(
             float(raw["starting_balance"]) if raw.get("starting_balance") is not None else None
         ),
