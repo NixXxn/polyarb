@@ -14,7 +14,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +28,11 @@ from arbot.signals import QuantMeta, Signal
 from arbot.sizing import account_cash, scaled_size
 
 log = logging.getLogger("arbot")
+
+# Gamma /markets caps each response at 100 regardless of the requested limit.
+_GAMMA_PAGE_SIZE = 100
+# Cap CLOB book fetches per scan so a wide 24h window cannot blow the poll.
+_MAX_MARKETS_TO_QUOTE = 100
 
 # Prefer fast-moving crypto + weather; still allow other binary markets at lower rank.
 _PREFERRED_MARKERS = (
@@ -178,31 +183,86 @@ def _log_arb(
     )
 
 
+def _gamma_market_pages(
+    engine: Engine,
+    params: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Page through Gamma /markets. The API ignores limit>100, so offset is required."""
+    out: list[dict[str, Any]] = []
+    page_size = min(_GAMMA_PAGE_SIZE, max(1, limit))
+    offset = 0
+    while len(out) < limit:
+        chunk = min(page_size, limit - len(out))
+        query = {**params, "limit": chunk, "offset": offset}
+        try:
+            data = engine.api._gamma_get("/markets", params=query)
+        except Exception as e:
+            log.warning("arbitrage: market fetch failed: %s", e)
+            break
+        if not isinstance(data, list) or not data:
+            break
+        out.extend(data)
+        if len(data) < chunk:
+            break
+        offset += len(data)
+    return out
+
+
+def _merge_gamma_markets(*batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for batch in batches:
+        for row in batch:
+            slug = str(row.get("slug") or "")
+            if not slug or slug in seen:
+                continue
+            seen.add(slug)
+            merged.append(row)
+    return merged
+
+
 def discover_arb_markets(
     engine: Engine,
     settings: Settings,
     *,
     limit: int | None = None,
 ) -> list[_ArbMarket]:
-    """Fetch active binary markets; keep only those that resolve inside max_horizon_hours."""
+    """Fetch active binary markets; keep only those that resolve inside max_horizon_hours.
+
+    Gamma's volume ranking is dominated by long-dated books, and each response is
+    capped at 100 rows. Pull a soon-ending window (paginated) and merge with the
+    volume list so 5m/15m crypto Up/Down markets are not dropped.
+    """
     cfg = settings.arbitrage
     lim = int(limit if limit is not None else cfg.scan_limit)
-    try:
-        data = engine.api._gamma_get(
-            "/markets",
-            params={
+    volume_rows = _gamma_market_pages(
+        engine,
+        {
+            "active": "true",
+            "closed": "false",
+            "order": "volume24hr",
+            "ascending": "false",
+        },
+        limit=lim,
+    )
+    horizon_rows: list[dict[str, Any]] = []
+    if cfg.max_horizon_hours > 0:
+        now = datetime.now(timezone.utc)
+        horizon_rows = _gamma_market_pages(
+            engine,
+            {
                 "active": "true",
                 "closed": "false",
-                "limit": lim,
-                "order": "volume24hr",
-                "ascending": "false",
+                "order": "endDate",
+                "ascending": "true",
+                "end_date_min": now.isoformat(),
+                "end_date_max": (now + timedelta(hours=cfg.max_horizon_hours)).isoformat(),
             },
+            limit=lim,
         )
-    except Exception as e:
-        log.warning("arbitrage: market fetch failed: %s", e)
-        return []
-    if not isinstance(data, list):
-        return []
+    data = _merge_gamma_markets(horizon_rows, volume_rows)
 
     out: list[_ArbMarket] = []
     for m in data:
@@ -348,21 +408,24 @@ def analyze_arbitrage(
         return []
 
     markets = discover_arb_markets(engine, settings)
+    to_quote = markets[:_MAX_MARKETS_TO_QUOTE]
     _log_arb(
         engine,
         decision="scan",
         reason=(
             f"arbitrage scan: {len(markets)} binary candidates / "
+            f"quoting={len(to_quote)} / "
             f"budget=${pair_budget:.2f} / open_pairs={open_pair_count}"
         ),
         candidates=len(markets),
+        quoting=len(to_quote),
         open_pairs=open_pair_count,
         pair_budget=pair_budget,
     )
 
     signals: list[Signal] = []
     rejects: dict[str, int] = defaultdict(int)
-    for market in markets:
+    for market in to_quote:
         if open_pair_count + (len(signals) // 2) >= cfg.max_open_pairs:
             break
         if market.condition_id and market.condition_id in pairs:
@@ -507,7 +570,8 @@ def analyze_arbitrage(
             reason=f"no_arb_window: {summary}" if summary else "no_arb_window",
             skip_summary=summary or None,
             rejects=dict(rejects),
-            markets_scanned=len(markets),
+            markets_scanned=len(to_quote),
+            candidates=len(markets),
         )
     return signals
 

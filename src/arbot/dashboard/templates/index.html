@@ -76,7 +76,7 @@
     <div>
       <h1>Arbot</h1>
       <div class="sub">Two-leg spread capture · paper &amp; live</div>
-      <div class="sub" id="tzNote">Times in UTC</div>
+      <div class="sub" id="tzNote">Times in server timezone</div>
       <div class="sub" id="meta">Loading…</div>
     </div>
     <div class="row">
@@ -109,12 +109,15 @@
 
     <section class="panel">
       <div class="label">Recent trades</div>
-      <div style="overflow:auto"><table id="trades"><thead><tr><th>When (UTC)</th><th>Side</th><th>Outcome</th><th>Price</th><th>USD</th><th>Market</th></tr></thead><tbody></tbody></table></div>
+      <div style="overflow:auto"><table id="trades"><thead><tr><th class="when-col">When</th><th>Side</th><th>Outcome</th><th>Price</th><th>USD</th><th>Market</th></tr></thead><tbody></tbody></table></div>
     </section>
 
     <section class="panel">
-      <div class="label">Activity</div>
-      <div style="overflow:auto"><table id="activity"><thead><tr><th>When (UTC)</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div>
+      <div class="row" style="justify-content:space-between;align-items:baseline;margin-bottom:0.6rem">
+        <div class="label">Activity</div>
+        <div class="sub" id="serverClock">Server time: —</div>
+      </div>
+      <div style="overflow:auto"><table id="activity"><thead><tr><th class="when-col">When</th><th>Event</th><th>Message</th></tr></thead><tbody></tbody></table></div>
     </section>
   </main>
   <script>
@@ -126,22 +129,54 @@
       if (value == null || value === "") return null;
       const raw = String(value).trim();
       if (!raw) return null;
-      const stripped = raw.replace(/\s+UTC$/i, "");
+      const stripped = raw.replace(/\s+[A-Za-z._+\-/0-9]+$/, "");
       const hasZone = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(stripped);
       const iso = stripped.includes("T") ? stripped : stripped.replace(" ", "T");
       const parsed = new Date(hasZone ? iso : iso + "Z");
       return Number.isNaN(parsed.getTime()) ? null : parsed;
     }
 
-    function fmtUtc(value) {
-      if (value == null || value === "") return "—";
-      const dt = parseUtcDate(value);
-      if (!dt) return String(value);
+    let clockEpoch = { fetchedAt: 0, serverMs: 0, offsetMin: 0, abbr: "UTC", tzName: "UTC" };
+    let clockTimer = null;
+
+    function formatInOffset(date, offsetMin, abbr) {
+      const shifted = new Date(date.getTime() + offsetMin * 60000);
       const pad = (n) => String(n).padStart(2, "0");
       return (
-        `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())} ` +
-        `${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())}:${pad(dt.getUTCSeconds())} UTC`
+        `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())} ` +
+        `${pad(shifted.getUTCHours())}:${pad(shifted.getUTCMinutes())}:${pad(shifted.getUTCSeconds())} ${abbr}`
       );
+    }
+
+    function fmtTs(value) {
+      if (value == null || value === "") return "—";
+      const raw = String(value).trim();
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} /.test(raw)) return raw;
+      const dt = parseUtcDate(value);
+      if (!dt) return raw;
+      return formatInOffset(dt, clockEpoch.offsetMin, clockEpoch.abbr);
+    }
+
+    function paintClock() {
+      const el = $("serverClock");
+      if (!el || !clockEpoch.fetchedAt) return;
+      const now = new Date(clockEpoch.serverMs + (Date.now() - clockEpoch.fetchedAt));
+      el.textContent = `Server time: ${formatInOffset(now, clockEpoch.offsetMin, clockEpoch.abbr)} · ${clockEpoch.tzName}`;
+    }
+
+    function syncClock(data) {
+      const iso = data.server_time_iso;
+      clockEpoch = {
+        fetchedAt: Date.now(),
+        serverMs: iso ? Date.parse(iso) : Date.now(),
+        offsetMin: Number(data.utc_offset_minutes || 0),
+        abbr: data.timezone_abbr || "UTC",
+        tzName: data.timezone_name || data.timezone || "UTC",
+      };
+      const whenLabel = `When (${clockEpoch.abbr})`;
+      document.querySelectorAll(".when-col").forEach((el) => { el.textContent = whenLabel; });
+      paintClock();
+      if (!clockTimer) clockTimer = setInterval(paintClock, 1000);
     }
 
     const FIELD_DEFS = [
@@ -248,9 +283,10 @@
       const res = await fetch(`/api/dashboard?mode=${encodeURIComponent(mode)}`);
       const data = await res.json();
       if (!data.ok) throw new Error(data.error || "load failed");
-      const tz = data.timezone || "UTC";
+      const tz = data.timezone || data.timezone_abbr || "UTC";
       $("tzNote").textContent = `Times in ${tz}`;
       $("meta").innerHTML = `<span class="pill">${data.mode}</span> · ${data.data_dir} · ${tz}`;
+      syncClock(data);
       const p = data.portfolio;
       $("stats").innerHTML = [
         ["Cash", money(p.cash)],
@@ -274,14 +310,14 @@
 
       const ttb = $("trades").querySelector("tbody");
       ttb.innerHTML = (data.trades||[]).slice(0,40).map(r => `<tr>
-        <td>${fmtUtc(r.created_at)}</td><td>${r.side}</td><td>${r.outcome}</td>
+        <td>${fmtTs(r.created_at)}</td><td>${r.side}</td><td>${r.outcome}</td>
         <td>${Number(r.avg_price).toFixed(3)}</td><td>${money(r.amount_usd)}</td>
         <td><a href="${r.url}" target="_blank" rel="noreferrer">${r.market_slug}</a></td>
       </tr>`).join("") || `<tr><td colspan="6" class="sub">No trades yet</td></tr>`;
 
       const atb = $("activity").querySelector("tbody");
       atb.innerHTML = (data.activity||[]).slice(0,30).map(r => `<tr>
-        <td>${fmtUtc(r.ts||r.created_at)}</td><td>${r.event||""}</td><td>${r.message||""}</td>
+        <td>${fmtTs(r.ts||r.created_at)}</td><td>${r.event||""}</td><td>${r.message||""}</td>
       </tr>`).join("") || `<tr><td colspan="3" class="sub">Quiet</td></tr>`;
 
       renderSettings(data.settings || {});

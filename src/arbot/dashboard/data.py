@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pm_trader.engine import Engine
 
@@ -17,25 +19,58 @@ from arbot.report import account_stats, combine_engines
 from arbot.scan_history import load_scan_history
 from arbot.trade_log import build_activity_feed, load_skipped_trades
 
-DISPLAY_TIMEZONE = "UTC"
+
+def server_tzinfo() -> timezone | ZoneInfo:
+    """IANA zone from $TZ, otherwise the process local zone."""
+    raw = (os.environ.get("TZ") or "").strip()
+    if raw:
+        try:
+            return ZoneInfo(raw)
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            pass
+    return datetime.now().astimezone().tzinfo or timezone.utc
 
 
-def format_dashboard_ts(value: Any) -> str:
-    """Format stored timestamps for the dashboard as explicit UTC.
+def server_clock(now: datetime | None = None) -> dict[str, Any]:
+    tz = server_tzinfo()
+    current = (now or datetime.now(timezone.utc)).astimezone(tz)
+    offset = current.utcoffset() or timedelta(0)
+    offset_minutes = int(offset.total_seconds() // 60)
+    hours, minutes = divmod(abs(offset_minutes), 60)
+    sign = "+" if offset_minutes >= 0 else "-"
+    utc_offset = f"{sign}{hours:02d}:{minutes:02d}"
+    abbr = current.tzname() or "UTC"
+    iana = getattr(tz, "key", None) or (os.environ.get("TZ") or "").strip() or abbr
+    label = "UTC" if offset_minutes == 0 and abbr in {"UTC", "GMT"} else f"{abbr} (UTC{utc_offset})"
+    return {
+        "timezone": iana,
+        "timezone_abbr": abbr,
+        "display_timezone": label,
+        "utc_offset": utc_offset,
+        "utc_offset_minutes": offset_minutes,
+        "server_time": current.strftime(f"%Y-%m-%d %H:%M:%S {abbr}"),
+        "server_time_iso": current.isoformat(),
+    }
+
+
+def format_dashboard_ts(value: Any, *, tz: timezone | ZoneInfo | None = None) -> str:
+    """Format stored timestamps in the server timezone.
 
     Activity/decision/scan logs write ``datetime.now(timezone.utc).isoformat()``.
     Ledger ``created_at`` values are typically naive UTC. Naive datetimes are
-    treated as UTC so browsers do not shift them to the viewer's local zone.
+    treated as UTC, then converted to the process timezone (or ``TZ``).
     """
     if value is None:
         return ""
+    zone = tz or server_tzinfo()
     if isinstance(value, datetime):
         dt = value
     else:
         text = str(value).strip()
         if not text:
             return ""
-        if text.endswith(" UTC"):
+        # Already formatted for display, e.g. "2026-09-05 16:50:10 CEST".
+        if "T" not in text and " " in text and not text[-1].isdigit():
             return text
         try:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -43,9 +78,9 @@ def format_dashboard_ts(value: Any) -> str:
             return text
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    local = dt.astimezone(zone)
+    abbr = local.tzname() or "UTC"
+    return local.strftime(f"%Y-%m-%d %H:%M:%S {abbr}")
 
 
 def _stamp_row(row: dict[str, Any], *keys: str) -> dict[str, Any]:
@@ -219,11 +254,18 @@ def fetch_dashboard(
         live_sync = load_live_sync_meta(resolved.data_dir) if resolved.is_live else None
         if live_sync:
             live_sync = _stamp_row(live_sync, "last_sync")
+        clock = server_clock()
         return {
             "ok": True,
             "mode": resolved.mode,
             "data_dir": str(resolved.data_dir),
-            "timezone": DISPLAY_TIMEZONE,
+            "timezone": clock["display_timezone"],
+            "timezone_name": clock["timezone"],
+            "timezone_abbr": clock["timezone_abbr"],
+            "utc_offset": clock["utc_offset"],
+            "utc_offset_minutes": clock["utc_offset_minutes"],
+            "server_time": clock["server_time"],
+            "server_time_iso": clock["server_time_iso"],
             "settings": settings_public_dict(settings),
             "portfolio": {
                 "cash": combined.cash,

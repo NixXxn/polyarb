@@ -120,3 +120,55 @@ def test_arbitrage_exits_lose_leg(monkeypatch, tmp_path):
     sigs = arbitrage_exits(engine, settings)
     assert any(s.outcome == "down" and "lose-leg" in s.reason for s in sigs)
     assert any(s.outcome == "up" and s.partial_exit for s in sigs)
+
+
+def test_discover_pages_soon_ending_markets(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from arbot.strategy import discover_arb_markets
+
+    settings = load_settings()
+    engine = MagicMock()
+    now = datetime.now(timezone.utc)
+
+    def page(prefix: str, count: int, start: int = 0) -> list[dict]:
+        rows = []
+        for i in range(start, start + count):
+            end = now + timedelta(minutes=10 + i)
+            rows.append(
+                {
+                    "slug": f"{prefix}-{i}",
+                    "question": "Bitcoin up or down?",
+                    "outcomes": '["Up", "Down"]',
+                    "liquidity": 2000,
+                    "volume24hr": 0,
+                    "endDate": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "conditionId": f"0x{prefix}{i}",
+                }
+            )
+        return rows
+
+    def gamma(_path, params=None):
+        params = params or {}
+        offset = int(params.get("offset") or 0)
+        limit = int(params.get("limit") or 100)
+        order = params.get("order")
+        if order == "endDate":
+            rows = page("btc-updown-5m", 150)
+        else:
+            rows = page("fed-rates", 5)
+            far = (now + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for row in rows:
+                row["endDate"] = far
+            rows[0]["slug"] = "will-fed-cut-next-year"
+        return rows[offset : offset + limit]
+
+    engine.api._gamma_get.side_effect = gamma
+    found = discover_arb_markets(engine, settings, limit=150)
+    slugs = {row.slug for row in found}
+    assert len(found) == 150
+    assert "btc-updown-5m-0" in slugs
+    assert "btc-updown-5m-149" in slugs
+    assert "will-fed-cut-next-year" not in slugs
+    assert engine.api._gamma_get.call_count >= 3
+
