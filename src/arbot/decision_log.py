@@ -165,6 +165,9 @@ REJECT_LABELS: dict[str, str] = {
     "edge_too_small": "edge too small",
     "not_preferred_maker": "maker skipped (not crypto/wx/LP)",
     "size_too_small": "size too small",
+    "book_error": "order book fetch failed",
+    "no_ask": "no ask on one or both legs",
+    "ask_sum_too_high": "combined asks above maker cap",
 }
 
 

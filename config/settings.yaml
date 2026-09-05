@@ -9,13 +9,13 @@ user_agent: polymarket-arb/0.1
 arbitrage:
   starting_balance: 1000
   max_pair_cost: 0.95
-  max_maker_ask_sum: 0.99
+  max_maker_ask_sum: 1.06
   min_edge: 0.05
   fee_buffer: 0.0
   min_liquidity: 400
   min_volume_24h: 150
   min_ask: 0.02
-  max_ask: 0.95
+  max_ask: 0.99
   min_ask_size: 5
   position_usd: 80
   max_position_usd: 80

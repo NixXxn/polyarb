@@ -33,14 +33,17 @@ def test_analyze_arbitrage_emits_paired_legs(monkeypatch, tmp_path):
     monkeypatch.setattr(
         arb_mod,
         "_quote_pair",
-        lambda *_a, **_k: SimpleNamespace(
-            market=market,
-            ask_a=0.42,
-            ask_b=0.48,
-            size_a=100.0,
-            size_b=100.0,
-            pair_cost=0.90,
-            edge=0.09,
+        lambda *_a, **_k: (
+            SimpleNamespace(
+                market=market,
+                ask_a=0.42,
+                ask_b=0.48,
+                size_a=100.0,
+                size_b=100.0,
+                pair_cost=0.90,
+                edge=0.09,
+            ),
+            None,
         ),
     )
 
@@ -72,7 +75,7 @@ def test_analyze_arbitrage_skip_reason_includes_reject_counts(monkeypatch, tmp_p
     import arbot.strategy as arb_mod
 
     monkeypatch.setattr(arb_mod, "discover_arb_markets", lambda *_a, **_k: [market, market])
-    monkeypatch.setattr(arb_mod, "_quote_pair", lambda *_a, **_k: None)
+    monkeypatch.setattr(arb_mod, "_quote_pair", lambda *_a, **_k: (None, "no_ask"))
 
     assert analyze_arbitrage(engine, settings, paper_mode=True) == []
     from arbot.decision_log import load_decisions
@@ -80,8 +83,49 @@ def test_analyze_arbitrage_skip_reason_includes_reject_counts(monkeypatch, tmp_p
     skips = [row for row in load_decisions(tmp_path) if row.get("decision") == "skip"]
     assert skips
     assert skips[0]["reason"].startswith("no_arb_window:")
-    assert "2× no usable two-leg book" in skips[0]["reason"]
-    assert skips[0]["skip_summary"] == "2× no usable two-leg book"
+    assert "2× no ask on one or both legs" in skips[0]["reason"]
+    assert skips[0]["skip_summary"] == "2× no ask on one or both legs"
+
+
+def test_preferred_maker_rests_when_asks_sum_over_dollar(monkeypatch, tmp_path):
+    settings = load_settings()
+    engine = MagicMock()
+    engine.db.data_dir = tmp_path
+    engine.db.get_open_positions.return_value = []
+    engine.get_account.return_value = SimpleNamespace(cash=1000.0)
+
+    market = _ArbMarket(
+        condition_id="0xup",
+        slug="btc-updown-5m-1",
+        question="Bitcoin Up or Down?",
+        outcome_a="Up",
+        outcome_b="Down",
+        liquidity=8000,
+        volume_24h=500,
+        lp_reward_score=0.0,
+        preferred=True,
+        hours_to_end=0.08,
+    )
+
+    import arbot.strategy as arb_mod
+
+    monkeypatch.setattr(arb_mod, "discover_arb_markets", lambda *_a, **_k: [market])
+    full = MagicMock()
+    full.get_token_id.side_effect = lambda o: f"tok-{o.lower()}"
+    engine.api.get_market.return_value = full
+
+    def book_for(token):
+        if "up" in token:
+            return SimpleNamespace(asks=[FakeLevel(0.52, 80)], bids=[FakeLevel(0.51, 80)])
+        return SimpleNamespace(asks=[FakeLevel(0.50, 80)], bids=[FakeLevel(0.49, 80)])
+
+    engine.api.get_order_book.side_effect = book_for
+    sigs = analyze_arbitrage(engine, settings, paper_mode=True)
+    assert len(sigs) == 2
+    assert all(s.order_type == "limit" for s in sigs)
+    assert all(not s.paper_fill_at_limit for s in sigs)
+    assert round(sum(s.limit_price or 0 for s in sigs), 4) <= settings.arbitrage.max_pair_cost + 1e-9
+
 
 
 def test_arbitrage_exits_lose_leg(monkeypatch, tmp_path):

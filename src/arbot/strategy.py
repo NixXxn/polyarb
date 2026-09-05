@@ -33,6 +33,9 @@ log = logging.getLogger("arbot")
 _GAMMA_PAGE_SIZE = 100
 # Cap CLOB book fetches per scan so a wide 24h window cannot blow the poll.
 _MAX_MARKETS_TO_QUOTE = 100
+# Fast Up/Down books usually sit just over $1 combined; still rest maker bids under.
+_MAKER_QUOTE_MAX_ASK = 0.99
+_MAKER_QUOTE_MAX_SUM = 1.08
 
 # Prefer fast-moving crypto + weather; still allow other binary markets at lower rank.
 _PREFERRED_MARKERS = (
@@ -337,8 +340,13 @@ def _quote_pair(
     engine: Engine,
     market: _ArbMarket,
     settings: Settings,
-) -> _ArbQuote | None:
+) -> tuple[_ArbQuote | None, str | None]:
     cfg = settings.arbitrage
+    maker_book = bool(market.preferred or market.lp_reward_score > 0)
+    quote_max_ask = _MAKER_QUOTE_MAX_ASK if maker_book else cfg.max_ask
+    quote_max_sum = (
+        max(cfg.max_maker_ask_sum, _MAKER_QUOTE_MAX_SUM) if maker_book else cfg.max_maker_ask_sum
+    )
     try:
         full = engine.api.get_market(market.slug)
         token_a = full.get_token_id(market.outcome_a)
@@ -347,28 +355,32 @@ def _quote_pair(
         book_b = engine.api.get_order_book(token_b)
     except Exception as e:
         log.debug("arbitrage book %s: %s", market.slug, e)
-        return None
+        return None, "book_error"
     ask_a, size_a = best_ask(book_a)
     ask_b, size_b = best_ask(book_b)
     if ask_a is None or ask_b is None:
-        return None
+        return None, "no_ask"
     if size_a < cfg.min_ask_size or size_b < cfg.min_ask_size:
-        return None
-    if not (cfg.min_ask <= ask_a <= cfg.max_ask and cfg.min_ask <= ask_b <= cfg.max_ask):
-        return None
+        return None, "ask_size_too_small"
+    if ask_a < cfg.min_ask or ask_b < cfg.min_ask:
+        return None, "ask_too_cheap"
+    if ask_a > quote_max_ask or ask_b > quote_max_ask:
+        return None, "ask_too_expensive"
     pair_cost = ask_a + ask_b
-    # Allow maker posts when asks are only slightly over $1 (spread capture).
-    if pair_cost > cfg.max_maker_ask_sum + 1e-9:
-        return None
+    if pair_cost > quote_max_sum + 1e-9:
+        return None, "ask_sum_too_high"
     edge = 1.0 - min(pair_cost, cfg.max_pair_cost) - cfg.fee_buffer
-    return _ArbQuote(
-        market=market,
-        ask_a=ask_a,
-        ask_b=ask_b,
-        size_a=size_a,
-        size_b=size_b,
-        pair_cost=pair_cost,
-        edge=edge,
+    return (
+        _ArbQuote(
+            market=market,
+            ask_a=ask_a,
+            ask_b=ask_b,
+            size_a=size_a,
+            size_b=size_b,
+            pair_cost=pair_cost,
+            edge=edge,
+        ),
+        None,
     )
 
 
@@ -435,9 +447,9 @@ def analyze_arbitrage(
             rejects["already_in"] += 1
             continue
 
-        quote = _quote_pair(engine, market, settings)
+        quote, quote_reject = _quote_pair(engine, market, settings)
         if quote is None:
-            rejects["no_quote"] += 1
+            rejects[quote_reject or "no_quote"] += 1
             continue
 
         taker_cap = cfg.max_pair_cost
@@ -486,8 +498,9 @@ def analyze_arbitrage(
             order_type = "limit"
             pair_ref = limit_a + limit_b
 
-        # Paper maker: fill both legs at posted limits so locked edge is bookable.
-        fill_at_limit = bool(paper_mode and cfg.paper_fak and order_type == "limit")
+        # Paper FAK takes the live ask. Maker rests — do not instant-fill a 5¢ edge
+        # that is not actually in the book (typical 5m combined ask is ~$1.00+).
+        fill_at_limit = bool(paper_mode and cfg.paper_fak and order_type == "limit" and taker_ok)
 
         # Equal shares so $1 payout covers both legs regardless of winner.
         target_shares = pair_budget / pair_ref
