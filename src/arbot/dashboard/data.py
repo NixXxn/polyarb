@@ -129,8 +129,22 @@ def reset_strategy_budgets(
     mode: str | None = None,
     balance: float,
 ) -> dict[str, Any]:
+    if balance <= 0:
+        raise ValueError("balance must be positive")
     settings, resolved = _resolve_dashboard(data_dir, mode)
     results = reset_all_strategies(resolved.data_dir, balance)
+    strat_dir = resolved.data_dir / STRATEGY
+    for name in ("arb_exit_state.json", "position_exit_state.json"):
+        path = strat_dir / name
+        if path.is_file():
+            path.unlink()
+    updated = update_settings(
+        {
+            "starting_balance": balance,
+            "arbitrage": {"starting_balance": balance},
+        },
+        settings.settings_path,
+    )
     return {
         "ok": True,
         "mode": resolved.mode,
@@ -139,7 +153,7 @@ def reset_strategy_budgets(
             {"name": name, "cash": cash, "starting_balance": starting}
             for name, cash, starting in results
         ],
-        "settings": settings_public_dict(settings),
+        "settings": settings_public_dict(updated),
     }
 
 

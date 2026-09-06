@@ -102,6 +102,15 @@
       </div>
       <div id="settingsStatus" class="sub" style="margin-bottom:0.75rem"></div>
       <div class="settings-grid" id="settingsForm"></div>
+      <div class="row" style="margin-top:1rem;align-items:end">
+        <div class="field">
+          <label for="resetBalance">Reset starting balance</label>
+          <input id="resetBalance" type="number" min="1" step="1" />
+        </div>
+        <button id="resetBalanceBtn">Reset paper account</button>
+        <span id="resetStatus" class="sub"></span>
+      </div>
+      <div class="sub" style="margin-top:0.4rem">Wipes local paper positions and sets cash + starting balance. Does not move live USDC.</div>
     </section>
 
     <section class="panel">
@@ -331,6 +340,10 @@
 
       renderSettings(data.settings || {});
       if (data.settings?.mode) $("mode").value = data.settings.mode === "live" ? "live" : "paper";
+      const startBal = data.settings?.arbitrage?.starting_balance ?? data.settings?.starting_balance ?? data.portfolio?.cash;
+      if ($("resetBalance") && (startBal != null) && !$("resetBalance").matches(":focus")) {
+        $("resetBalance").value = Number(startBal);
+      }
     }
 
     $("refresh").onclick = () => load().catch(e => alert(e.message));
@@ -341,6 +354,41 @@
     };
     $("exportTrades").onclick = () => csvExport("trades");
     $("exportActivity").onclick = () => csvExport("activity");
+    $("resetBalanceBtn").onclick = async () => {
+      const btn = $("resetBalanceBtn");
+      const status = $("resetStatus");
+      const amount = Number($("resetBalance").value);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        status.textContent = "Enter a positive amount.";
+        status.className = "err";
+        return;
+      }
+      const mode = $("mode").value;
+      const msg = mode === "live"
+        ? `Reset the LOCAL live ledger to $${amount.toFixed(2)}? This does not withdraw or deposit USDC on Polymarket.`
+        : `Wipe paper positions and set cash + starting balance to $${amount.toFixed(2)}?`;
+      if (!window.confirm(msg)) return;
+      btn.disabled = true;
+      status.textContent = "Resetting…";
+      status.className = "sub";
+      try {
+        const res = await fetch("/api/reset-balances", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({ balance: amount, mode }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "reset failed");
+        status.textContent = `Reset to $${amount.toFixed(2)}.`;
+        status.className = "ok";
+        await load();
+      } catch (e) {
+        status.textContent = e.message;
+        status.className = "err";
+      } finally {
+        btn.disabled = false;
+      }
+    };
     $("saveSettings").onclick = async () => {
       const btn = $("saveSettings");
       const status = $("settingsStatus");

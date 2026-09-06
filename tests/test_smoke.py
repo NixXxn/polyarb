@@ -44,6 +44,7 @@ def test_dashboard_index_renders():
     assert b"Arbot" in response.data
     assert b"Server time" in response.data
     assert b"CSV trades" in response.data
+    assert b"Reset paper account" in response.data
     health = client.get("/health")
     assert health.status_code == 200
     assert health.get_json()["ok"] is True
@@ -60,4 +61,28 @@ def test_csv_export(tmp_path, monkeypatch):
     trades = client.get("/api/export/trades.csv")
     assert trades.status_code == 200
     assert b"created_at" in trades.data
+
+
+def test_reset_balances_sets_starting_cash(tmp_path, monkeypatch):
+    src = load_settings().settings_path.read_text()
+    settings_path = tmp_path / "settings.yaml"
+    settings_path.write_text(src)
+    monkeypatch.setenv("ARBOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ARBOT_SETTINGS_PATH", str(settings_path))
+    from arbot.dashboard.app import app
+
+    client = app.test_client()
+    res = client.post(
+        "/api/reset-balances",
+        json={"balance": 250, "mode": "paper"},
+    )
+    assert res.status_code == 200
+    body = res.get_json()
+    assert body["ok"] is True
+    assert body["accounts"][0]["cash"] == 250
+    assert body["accounts"][0]["starting_balance"] == 250
+    assert body["settings"]["arbitrage"]["starting_balance"] == 250
+    bad = client.post("/api/reset-balances", json={"balance": 0, "mode": "paper"})
+    assert bad.status_code == 400
+
 
