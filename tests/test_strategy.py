@@ -48,9 +48,10 @@ def test_analyze_arbitrage_emits_paired_legs(monkeypatch, tmp_path):
     )
 
     sigs = analyze_arbitrage(engine, settings, paper_mode=True)
-    assert len(sigs) == 2
-    assert {s.outcome for s in sigs} == {"yes", "no"}
-    assert all(s.order_type == "fak" for s in sigs)
+    assert len(sigs) == 1
+    assert sigs[0].outcome == "yes"
+    assert "first-leg" in sigs[0].reason
+    assert sigs[0].order_type == "fak"
 
 
 def test_analyze_arbitrage_skip_reason_includes_reject_counts(monkeypatch, tmp_path):
@@ -121,10 +122,10 @@ def test_preferred_maker_rests_when_asks_sum_over_dollar(monkeypatch, tmp_path):
 
     engine.api.get_order_book.side_effect = book_for
     sigs = analyze_arbitrage(engine, settings, paper_mode=True)
-    assert len(sigs) == 2
-    assert all(s.order_type == "limit" for s in sigs)
-    assert all(not s.paper_fill_at_limit for s in sigs)
-    assert round(sum(s.limit_price or 0 for s in sigs), 4) <= settings.arbitrage.max_pair_cost + 1e-9
+    assert len(sigs) == 1
+    assert sigs[0].order_type == "limit"
+    assert not sigs[0].paper_fill_at_limit
+    assert sigs[0].outcome == "down"
 
 
 def test_fast_5m_does_not_rest_maker_on_dollar_book(monkeypatch, tmp_path):
@@ -164,6 +165,86 @@ def test_fast_5m_does_not_rest_maker_on_dollar_book(monkeypatch, tmp_path):
     assert "combined asks above maker cap" in skips[0]["reason"]
 
 
+def test_second_leg_limit_after_hedge_delay(monkeypatch, tmp_path):
+    import time
+
+    from arbot.arbitrage_state import ArbExitStore
+
+    settings = load_settings()
+    engine = MagicMock()
+    engine.db.data_dir = tmp_path
+    engine.get_account.return_value = SimpleNamespace(cash=1000.0)
+    pos = SimpleNamespace(
+        shares=40.0,
+        is_resolved=False,
+        market_condition_id="0xup",
+        market_slug="btc-up-or-down-august-6am-et",
+        outcome="down",
+        avg_entry_price=0.50,
+        total_cost=20.0,
+    )
+    engine.db.get_open_positions.return_value = [pos]
+    ArbExitStore(tmp_path).mark_first_leg(
+        "0xup",
+        market_slug=pos.market_slug,
+        first_outcome="down",
+        second_outcome="up",
+        second_limit=0.45,
+        target_shares=40,
+        at=time.time() - 130,
+    )
+    import arbot.strategy as arb_mod
+
+    monkeypatch.setattr(arb_mod, "discover_arb_markets", lambda *_a, **_k: [])
+    full = MagicMock()
+    full.get_token_id.side_effect = lambda o: f"tok-{o.lower()}"
+    engine.api.get_market.return_value = full
+    engine.api.get_order_book.return_value = SimpleNamespace(
+        asks=[FakeLevel(0.48, 80)], bids=[FakeLevel(0.47, 80)]
+    )
+    sigs = analyze_arbitrage(engine, settings, paper_mode=True)
+    assert len(sigs) == 1
+    assert sigs[0].outcome == "up"
+    assert "hedge second" in sigs[0].reason
+
+
+def test_orphan_not_sold_during_hedge_wait(tmp_path):
+    import time
+
+    from arbot.arbitrage_state import ArbExitStore
+
+    settings = load_settings()
+    engine = MagicMock()
+    engine.db.data_dir = tmp_path
+    pos = SimpleNamespace(
+        shares=40.0,
+        is_resolved=False,
+        market_condition_id="0xup",
+        market_slug="btc-up-or-down-august-6am-et",
+        outcome="down",
+        avg_entry_price=0.50,
+        total_cost=20.0,
+    )
+    engine.db.get_open_positions.return_value = [pos]
+    ArbExitStore(tmp_path).mark_first_leg(
+        "0xup",
+        market_slug=pos.market_slug,
+        first_outcome="down",
+        second_outcome="up",
+        second_limit=0.45,
+        target_shares=40,
+        at=time.time() - 30,
+    )
+    full = MagicMock()
+    full.get_token_id.side_effect = lambda o: f"tok-{o.lower()}"
+    engine.api.get_market.return_value = full
+    engine.api.get_order_book.return_value = SimpleNamespace(
+        asks=[FakeLevel(0.52, 20)], bids=[FakeLevel(0.50, 20)]
+    )
+    assert arbitrage_exits(engine, settings) == []
+
+
+
 
 
 def test_arbitrage_exits_lose_leg(monkeypatch, tmp_path):
@@ -195,13 +276,19 @@ def test_arbitrage_exits_lose_leg(monkeypatch, tmp_path):
 
     def book_for(token):
         if "up" in token:
-            return SimpleNamespace(asks=[FakeLevel(0.72, 20)], bids=[FakeLevel(0.71, 20)])
-        return SimpleNamespace(asks=[FakeLevel(0.30, 20)], bids=[FakeLevel(0.28, 20)])
+            return SimpleNamespace(asks=[FakeLevel(0.56, 20)], bids=[FakeLevel(0.55, 20)])
+        return SimpleNamespace(asks=[FakeLevel(0.32, 20)], bids=[FakeLevel(0.30, 20)])
 
     engine.api.get_order_book.side_effect = book_for
     sigs = arbitrage_exits(engine, settings)
-    assert any(s.outcome == "down" and "lose-leg" in s.reason for s in sigs)
-    assert any(s.outcome == "up" and s.partial_exit for s in sigs)
+    assert sigs == []
+    def book_par(token):
+        return SimpleNamespace(asks=[FakeLevel(0.51, 20)], bids=[FakeLevel(0.50, 20)])
+    engine.api.get_order_book.side_effect = book_par
+    sigs = arbitrage_exits(engine, settings)
+    assert len(sigs) == 2
+    assert all("pair exit" in s.reason for s in sigs)
+    assert not any(s.partial_exit for s in sigs)
 
 
 def test_discover_pages_soon_ending_markets(monkeypatch):

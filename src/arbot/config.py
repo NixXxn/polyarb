@@ -43,6 +43,10 @@ EDITABLE_ARBITRAGE_KEYS = (
     "maker_min_horizon_hours",
     "maker_balanced_min",
     "maker_balanced_max",
+    "hedge_delay_seconds",
+    "hedge_abort_seconds",
+    "hold_complete_pairs",
+    "pair_exit_bid_sum",
     "exit_ladder_prices",
     "exit_ladder_fraction",
     "lose_leg_bid_max",
@@ -94,6 +98,10 @@ class ArbitrageSettings:
     maker_min_horizon_hours: float
     maker_balanced_min: float
     maker_balanced_max: float
+    hedge_delay_seconds: int
+    hedge_abort_seconds: int
+    hold_complete_pairs: bool
+    pair_exit_bid_sum: float
     starting_balance: float | None
     exit_ladder_prices: tuple[float, ...]
     exit_ladder_fraction: float
@@ -161,6 +169,10 @@ def _arb_from_raw(raw: dict[str, Any]) -> ArbitrageSettings:
         maker_min_horizon_hours=float(raw.get("maker_min_horizon_hours", 1.0)),
         maker_balanced_min=float(raw.get("maker_balanced_min", 0.35)),
         maker_balanced_max=float(raw.get("maker_balanced_max", 0.65)),
+        hedge_delay_seconds=int(raw.get("hedge_delay_seconds", 120)),
+        hedge_abort_seconds=int(raw.get("hedge_abort_seconds", 1800)),
+        hold_complete_pairs=bool(raw.get("hold_complete_pairs", True)),
+        pair_exit_bid_sum=float(raw.get("pair_exit_bid_sum", 0.99)),
         starting_balance=(
             float(raw["starting_balance"]) if raw.get("starting_balance") is not None else None
         ),

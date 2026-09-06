@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -311,5 +313,66 @@ def fetch_dashboard(
             "live_orders": load_live_open_orders(resolved.data_dir) if resolved.is_live else [],
             "live_sync": live_sync,
         }
+    finally:
+        engine.close()
+
+
+def export_dashboard_csv(
+    kind: str,
+    *,
+    data_dir: Path | None = None,
+    mode: str | None = None,
+) -> tuple[str, str]:
+    """Return (csv_text, filename) for trades or activity."""
+    settings, resolved = _resolve_dashboard(data_dir, mode)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    kind = (kind or "trades").strip().lower()
+    if kind == "activity":
+        rows = build_activity_feed(resolved.data_dir, limit=2000)
+        fields = ["ts", "event", "decision", "strategy", "message", "slug", "action"]
+        filename = f"arbot-activity-{stamp}.csv"
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in fields})
+        return buf.getvalue(), filename
+
+    balance = float(settings.arbitrage.starting_balance or settings.starting_balance)
+    engine = make_engine(STRATEGY, resolved.data_dir, balance)
+    try:
+        trades = engine.db.get_trades(limit=10000)
+        fields = [
+            "created_at",
+            "side",
+            "outcome",
+            "avg_price",
+            "amount_usd",
+            "shares",
+            "fee",
+            "order_type",
+            "market_slug",
+            "market_question",
+        ]
+        filename = f"arbot-trades-{stamp}.csv"
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=fields)
+        writer.writeheader()
+        for t in trades:
+            writer.writerow(
+                {
+                    "created_at": t.created_at,
+                    "side": t.side,
+                    "outcome": t.outcome,
+                    "avg_price": t.avg_price,
+                    "amount_usd": t.amount_usd,
+                    "shares": t.shares,
+                    "fee": t.fee,
+                    "order_type": t.order_type,
+                    "market_slug": t.market_slug,
+                    "market_question": t.market_question,
+                }
+            )
+        return buf.getvalue(), filename
     finally:
         engine.close()

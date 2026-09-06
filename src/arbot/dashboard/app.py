@@ -9,6 +9,7 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from arbot.config import ROOT
 from arbot.dashboard.data import (
+    export_dashboard_csv,
     fetch_dashboard,
     reset_all_statistics,
     reset_strategy_budgets,
@@ -173,6 +174,26 @@ def set_strategy_budget_api():
         return jsonify(payload)
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/export/<kind>.csv")
+@requires_auth
+def export_csv_api(kind: str):
+    try:
+        if kind not in {"trades", "activity"}:
+            return jsonify({"ok": False, "error": "kind must be trades or activity"}), 400
+        body, filename = export_dashboard_csv(
+            kind,
+            data_dir=Path(request.args["data_dir"]) if request.args.get("data_dir") else None,
+            mode=request.args.get("mode"),
+        )
+        return Response(
+            body,
+            mimetype="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 

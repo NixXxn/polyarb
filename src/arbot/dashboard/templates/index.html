@@ -85,6 +85,8 @@
         <option value="live">Live</option>
       </select>
       <button id="refresh">Refresh</button>
+      <button id="exportTrades">CSV trades</button>
+      <button id="exportActivity">CSV activity</button>
     </div>
   </header>
   <main>
@@ -198,6 +200,10 @@
       { path: "arbitrage.maker_min_horizon_hours", label: "Maker min hours to resolution", type: "number", step: "0.1" },
       { path: "arbitrage.maker_balanced_min", label: "Maker min ask (balanced)", type: "number", step: "0.01" },
       { path: "arbitrage.maker_balanced_max", label: "Maker max ask (balanced)", type: "number", step: "0.01" },
+      { path: "arbitrage.hedge_delay_seconds", label: "Second-leg wait (s)", type: "number" },
+      { path: "arbitrage.hedge_abort_seconds", label: "Unhedged abort (s)", type: "number" },
+      { path: "arbitrage.hold_complete_pairs", label: "Hold complete pairs to resolution", type: "checkbox" },
+      { path: "arbitrage.pair_exit_bid_sum", label: "Early pair-exit bid sum", type: "number", step: "0.01" },
       { path: "arbitrage.paper_fak", label: "Paper FAK / fill-at-limit", type: "checkbox" },
       { path: "arbitrage.prefer_crypto_weather", label: "Prefer crypto/weather", type: "checkbox" },
       { path: "arbitrage.prefer_lp_rewards", label: "Prefer LP rewards", type: "checkbox" },
@@ -329,6 +335,12 @@
 
     $("refresh").onclick = () => load().catch(e => alert(e.message));
     $("mode").onchange = () => load().catch(e => alert(e.message));
+    const csvExport = (kind) => {
+      const mode = $("mode").value;
+      window.location.href = `/api/export/${kind}.csv?mode=${encodeURIComponent(mode)}`;
+    };
+    $("exportTrades").onclick = () => csvExport("trades");
+    $("exportActivity").onclick = () => csvExport("activity");
     $("saveSettings").onclick = async () => {
       const btn = $("saveSettings");
       const status = $("settingsStatus");

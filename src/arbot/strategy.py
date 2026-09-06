@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -409,14 +410,103 @@ def _quote_pair(
     )
 
 
+def _complete_pending_hedges(
+    engine: Engine,
+    settings: Settings,
+    *,
+    paper_mode: bool,
+) -> list[Signal]:
+    """After the first-leg wait, rest a limit on the other side to lock the pair."""
+    from arbot.arbitrage_state import ArbExitStore
+
+    cfg = settings.arbitrage
+    delay = float(getattr(cfg, "hedge_delay_seconds", 120) or 120)
+    store = ArbExitStore(engine.db.data_dir)
+    positions = engine.db.get_open_positions()
+    pairs = _open_pairs(positions)
+    now = time.time()
+    signals: list[Signal] = []
+    bankroll = account_cash(engine, cfg.starting_balance or settings.starting_balance)
+
+    for key, legs in pairs.items():
+        if len(legs) >= 2:
+            continue
+        state = store.get(key)
+        if state is None or state.first_leg_at is None or state.hedge_submitted:
+            continue
+        if now - state.first_leg_at < delay:
+            continue
+        first_outcome = (state.first_outcome or next(iter(legs))).lower()
+        pos = legs.get(first_outcome) or next(iter(legs.values()))
+        second_name = state.second_outcome
+        if not second_name:
+            continue
+        try:
+            full = engine.api.get_market(pos.market_slug)
+            token = full.get_token_id(second_name)
+            book = engine.api.get_order_book(token)
+        except Exception:
+            continue
+        ask, size = best_ask(book)
+        if ask is None or size < cfg.min_ask_size:
+            continue
+        first_px = float(pos.avg_entry_price or 0)
+        planned = state.second_limit if state.second_limit is not None else (cfg.max_pair_cost - first_px)
+        limit = round(max(cfg.min_ask, min(planned, cfg.max_pair_cost - first_px)), 4)
+        if first_px + limit > cfg.max_pair_cost + 1e-9:
+            limit = round(max(cfg.min_ask, cfg.max_pair_cost - first_px), 4)
+        shares = float(state.target_shares or pos.shares)
+        shares = min(shares, size, pos.shares)
+        take = ask <= limit + 1e-9
+        order_type = "fak" if (take or (paper_mode and cfg.paper_fak and ask <= limit + 0.02)) else "limit"
+        use_price = round(ask if order_type == "fak" else limit, 4)
+        if first_px + use_price > 1.0 + 1e-9:
+            # Never complete a hedge that locks a guaranteed loss vs $1 payout.
+            continue
+        amount = round(shares * use_price, 2)
+        if amount < settings.min_position_usd or amount > bankroll:
+            continue
+        reason = (
+            f"hedge second leg {second_name} after {delay:.0f}s "
+            f"limit={use_price:.3f} first={first_outcome}@{first_px:.3f} "
+            f"sum={first_px + use_price:.3f}"
+        )
+        _log_arb(
+            engine,
+            decision="buy",
+            reason=reason,
+            slug=pos.market_slug,
+            limit_a=first_px,
+            limit_b=use_price,
+            pair_cost=round(first_px + use_price, 4),
+            stake_usd=amount,
+        )
+        store.mark_hedge_submitted(key, market_slug=pos.market_slug)
+        signals.append(
+            Signal(
+                action="buy",
+                slug=pos.market_slug,
+                outcome=second_name,
+                amount_usd=amount,
+                order_type=order_type,
+                limit_price=use_price,
+                paper_fill_at_limit=bool(paper_mode and cfg.paper_fak and order_type == "fak"),
+                market_condition_id=pos.market_condition_id or key,
+                reason=reason,
+            )
+        )
+    return signals
+
+
 def analyze_arbitrage(
     engine: Engine,
     settings: Settings,
     *,
     paper_mode: bool = False,
 ) -> list[Signal]:
-    """Emit paired YES+NO (or Up+Down) buys when combined ask locks an edge under $1."""
+    """Buy the cheaper leg now; complete the hedge with a limit after hedge_delay_seconds."""
     cfg = settings.arbitrage
+    hedge_signals = _complete_pending_hedges(engine, settings, paper_mode=paper_mode)
     positions = engine.db.get_open_positions()
     pairs = _open_pairs(positions)
     open_pair_count = sum(1 for legs in pairs.values() if len(legs) >= 1)
@@ -428,7 +518,7 @@ def analyze_arbitrage(
             open_pairs=open_pair_count,
             max_open_pairs=cfg.max_open_pairs,
         )
-        return []
+        return hedge_signals
 
     bankroll = account_cash(engine, cfg.starting_balance or settings.starting_balance)
     remaining_slots = max(1, cfg.max_open_pairs - open_pair_count)
@@ -442,7 +532,7 @@ def analyze_arbitrage(
     )
     if pair_budget is None:
         _log_arb(engine, decision="skip", reason="insufficient_cash", cash=bankroll)
-        return []
+        return hedge_signals
 
     markets = discover_arb_markets(engine, settings)
     to_quote = markets[:_MAX_MARKETS_TO_QUOTE]
@@ -460,10 +550,10 @@ def analyze_arbitrage(
         pair_budget=pair_budget,
     )
 
-    signals: list[Signal] = []
+    signals: list[Signal] = list(hedge_signals)
     rejects: dict[str, int] = defaultdict(int)
     for market in to_quote:
-        if open_pair_count + (len(signals) // 2) >= cfg.max_open_pairs:
+        if open_pair_count + max(0, len(signals) - len(hedge_signals)) >= cfg.max_open_pairs:
             break
         if market.condition_id and market.condition_id in pairs:
             rejects["already_in"] += 1
@@ -577,32 +667,40 @@ def analyze_arbitrage(
             kelly_fraction=0.0,
             source="arbitrage",
         )
-        signals.append(
-            Signal(
-                action="buy",
-                slug=market.slug,
-                outcome=market.outcome_a.lower(),
-                amount_usd=amount_a,
-                order_type=order_type,
-                limit_price=limit_a,
-                paper_fill_at_limit=fill_at_limit,
-                market_condition_id=market.condition_id or None,
-                quant=quant,
-                reason=reason + f" leg={market.outcome_a}",
-            )
+        # First leg: take the cheaper ask now. Second leg waits hedge_delay_seconds.
+        if quote.ask_a <= quote.ask_b:
+            first_outcome, first_limit, first_amount = market.outcome_a, limit_a, amount_a
+            second_outcome, second_limit = market.outcome_b, limit_b
+        else:
+            first_outcome, first_limit, first_amount = market.outcome_b, limit_b, amount_b
+            second_outcome, second_limit = market.outcome_a, limit_a
+        first_fill = bool(
+            paper_mode and cfg.paper_fak and (order_type == "fak" or taker_ok)
+        )
+        first_type = "fak" if (use_fak or first_fill) else order_type
+        from arbot.arbitrage_state import ArbExitStore
+
+        pair_key = market.condition_id or market.slug
+        ArbExitStore(engine.db.data_dir).mark_first_leg(
+            pair_key,
+            market_slug=market.slug,
+            first_outcome=first_outcome,
+            second_outcome=second_outcome,
+            second_limit=second_limit,
+            target_shares=target_shares,
         )
         signals.append(
             Signal(
                 action="buy",
                 slug=market.slug,
-                outcome=market.outcome_b.lower(),
-                amount_usd=amount_b,
-                order_type=order_type,
-                limit_price=limit_b,
-                paper_fill_at_limit=fill_at_limit,
+                outcome=first_outcome.lower(),
+                amount_usd=first_amount,
+                order_type=first_type,
+                limit_price=first_limit,
+                paper_fill_at_limit=first_fill,
                 market_condition_id=market.condition_id or None,
                 quant=quant,
-                reason=reason + f" leg={market.outcome_b}",
+                reason=reason + f" first-leg={first_outcome} (hedge {second_outcome} in {int(getattr(cfg, 'hedge_delay_seconds', 120))}s)",
             )
         )
 
@@ -621,20 +719,26 @@ def analyze_arbitrage(
 
 
 def arbitrage_exits(engine: Engine, settings: Settings) -> list[Signal]:
-    """Hybrid active exits after arb entry: lose-leg salvage, ladder TP, momentum trim.
+    """Hold locked pairs to resolution. Only sell both when combined bids lock a gain.
 
-    Incomplete (orphan) pairs are still unwound. Complete pairs no longer hold both
-    legs to resolution — capital turns over via laddered winner sells + lose-leg exits.
+    Overnight wipeouts came from selling the winner in ladder slices and dumping the
+    loser, leaving a directional bag that resolved at ~0. Incomplete first-legs wait
+    for the 2-minute hedge instead of being orphan-sold on the next scan.
     """
     from arbot.arbitrage_state import ArbExitStore
 
     cfg = settings.arbitrage
+    delay = float(getattr(cfg, "hedge_delay_seconds", 120) or 120)
+    abort = float(getattr(cfg, "hedge_abort_seconds", 1800) or 1800)
+    pair_exit = float(getattr(cfg, "pair_exit_bid_sum", 0.99) or 0.99)
+    hold_complete = bool(getattr(cfg, "hold_complete_pairs", True))
     positions = engine.db.get_open_positions()
     pairs = _open_pairs(positions)
     store = ArbExitStore(engine.db.data_dir)
-    store.prune_closed(positions)
+    store.prune_closed(positions, abort_seconds=abort)
     signals: list[Signal] = []
     min_sell_usd = float(settings.min_position_usd)
+    now = time.time()
 
     def _leg_book(pos: Position) -> tuple[float | None, float | None]:
         try:
@@ -646,11 +750,6 @@ def arbitrage_exits(engine: Engine, settings: Settings) -> list[Signal]:
         bid, _ = best_bid(book)
         ask, _ = best_ask(book)
         return bid, ask
-
-    def _mid(bid: float | None, ask: float | None) -> float | None:
-        if bid is not None and ask is not None:
-            return (bid + ask) / 2.0
-        return bid if bid is not None else ask
 
     def _sell(
         pos: Position,
@@ -665,7 +764,6 @@ def arbitrage_exits(engine: Engine, settings: Settings) -> list[Signal]:
         if sell_shares <= 0:
             return None
         if sell_shares * bid < min_sell_usd and sell_shares < pos.shares - 1e-9:
-            # Skip dust partials; allow full exits even if small.
             return None
         _log_arb(
             engine,
@@ -692,141 +790,55 @@ def arbitrage_exits(engine: Engine, settings: Settings) -> list[Signal]:
         )
 
     for key, legs in pairs.items():
-        # Orphan: incomplete fill — exit remaining directional risk unless lose-leg
-        # already harvested intentionally (winner left for ladder TP).
         if len(legs) < 2:
-            if key and store.lose_leg_sold(key):
-                # Remaining winner: still apply ladder / rebalance below via single-leg path.
-                pass
-            else:
-                for outcome, pos in legs.items():
-                    bid, _ask = _leg_book(pos)
-                    if bid is None or bid < 0.01:
-                        continue
-                    reason = (
-                        f"arb orphan exit {outcome} bid={bid:.3f} "
-                        f"(incomplete pair on {pos.market_slug})"
-                    )
-                    sig = _sell(pos, pos.shares, reason=reason, bid=bid)
-                    if sig:
-                        signals.append(sig)
+            state = store.get(key)
+            age = None
+            if state and state.first_leg_at is not None:
+                age = now - state.first_leg_at
+            if age is None or age < abort:
+                # Still inside hedge window (or unknown): do not dump the first leg.
                 continue
-
-        # Complete pair (or winner left after lose-leg): quote both sides.
-        quoted: list[tuple[str, Position, float, float | None]] = []
-        for outcome, pos in legs.items():
-            bid, ask = _leg_book(pos)
-            if bid is None:
-                continue
-            quoted.append((outcome, pos, bid, ask))
-        if len(quoted) < 1:
-            continue
-
-        condition_id = key if key else (quoted[0][1].market_condition_id or quoted[0][1].market_slug)
-        market_slug = quoted[0][1].market_slug
-
-        for outcome, pos, bid, ask in quoted:
-            store.set_baseline(condition_id, outcome, pos.shares, market_slug=market_slug)
-            mid = _mid(bid, ask)
-            if mid is not None and store.last_mid(condition_id, outcome) is None:
-                store.set_last_mid(condition_id, outcome, mid, market_slug=market_slug)
-
-        # Identify leader / laggard by bid.
-        quoted_sorted = sorted(quoted, key=lambda row: row[2], reverse=True)
-        win_outcome, win_pos, win_bid, win_ask = quoted_sorted[0]
-        lose_row = quoted_sorted[-1] if len(quoted_sorted) >= 2 else None
-
-        # 1) Losing-leg exit — salvage hedge when trend is clear.
-        if (
-            lose_row is not None
-            and not store.lose_leg_sold(condition_id)
-            and win_bid >= cfg.lose_leg_lead_bid
-            and cfg.lose_leg_bid_min <= lose_row[2] <= cfg.lose_leg_bid_max
-        ):
-            lose_outcome, lose_pos, lose_bid, _lose_ask = lose_row
-            reason = (
-                f"arb lose-leg exit {lose_outcome} bid={lose_bid:.3f} "
-                f"(lead {win_outcome}@{win_bid:.3f} >= {cfg.lose_leg_lead_bid:.2f})"
-            )
-            store.mark_lose_leg_sold(condition_id, market_slug=market_slug)
-            sig = _sell(lose_pos, lose_pos.shares, reason=reason, bid=lose_bid)
-            if sig:
-                signals.append(sig)
-
-        # Single remaining or winner leg for TP / rebalance.
-        lead_outcome, lead_pos, lead_bid, lead_ask = win_outcome, win_pos, win_bid, win_ask
-        if lead_pos.shares <= 0:
-            continue
-
-        # 2) Laddered take-profit on the leading leg (absolute price rungs).
-        baseline = store.baseline(condition_id, lead_outcome) or lead_pos.shares
-        tranche = baseline * cfg.exit_ladder_fraction
-        laddered = False
-        for level in cfg.exit_ladder_prices:
-            if lead_bid + 1e-9 < level:
-                break
-            if store.ladder_hit(condition_id, lead_outcome, level):
-                continue
-            sell_shares = min(lead_pos.shares, tranche)
-            if sell_shares <= 0:
-                continue
-            reason = (
-                f"arb ladder TP {int(cfg.exit_ladder_fraction * 100)}% "
-                f"@ {level:.2f} bid={lead_bid:.3f} ({lead_outcome})"
-            )
-            store.mark_ladder(condition_id, lead_outcome, level, market_slug=market_slug)
-            sig = _sell(
-                lead_pos,
-                sell_shares,
-                reason=reason,
-                bid=lead_bid,
-                partial=True,
-                ladder_level=level,
-            )
-            if sig:
-                signals.append(sig)
-                # Reduce local view so subsequent rungs don't oversell same scan.
-                lead_pos = SimpleNamespace(  # type: ignore[assignment]
-                    shares=max(0.0, float(lead_pos.shares) - sell_shares),
-                    market_slug=lead_pos.market_slug,
-                    outcome=lead_pos.outcome,
-                    market_condition_id=lead_pos.market_condition_id,
-                    avg_entry_price=lead_pos.avg_entry_price,
-                    total_cost=getattr(lead_pos, "total_cost", 0.0),
-                    is_resolved=False,
-                )
-                laddered = True
-                if lead_pos.shares <= 0:
-                    break
-
-        # 3) Momentum rebalance — trim leader on significant mid advances.
-        if (
-            cfg.rebalance_enabled
-            and not laddered
-            and lead_pos.shares > 0
-            and lead_bid >= cfg.rebalance_min_lead
-        ):
-            mid = _mid(lead_bid, lead_ask)
-            prev = store.last_mid(condition_id, lead_outcome)
-            if mid is not None and prev is not None and (mid - prev) >= cfg.rebalance_move:
-                sell_shares = lead_pos.shares * cfg.rebalance_fraction
+            for _outcome, pos in legs.items():
+                bid, _ask = _leg_book(pos)
+                if bid is None or bid < 0.20:
+                    continue
                 reason = (
-                    f"arb rebalance trim {int(cfg.rebalance_fraction * 100)}% "
-                    f"{lead_outcome} mid {prev:.3f}->{mid:.3f} "
-                    f"(Δ>={cfg.rebalance_move:.2f})"
+                    f"arb hedge abort {pos.outcome} bid={bid:.3f} "
+                    f"after {age:.0f}s unhedged on {pos.market_slug}"
                 )
-                store.set_last_mid(condition_id, lead_outcome, mid, market_slug=market_slug)
-                sig = _sell(
-                    lead_pos,
-                    sell_shares,
-                    reason=reason,
-                    bid=lead_bid,
-                    partial=True,
-                    ladder_level=round(mid, 4),
-                )
+                sig = _sell(pos, pos.shares, reason=reason, bid=bid)
                 if sig:
                     signals.append(sig)
-            elif mid is not None:
-                store.set_last_mid(condition_id, lead_outcome, mid, market_slug=market_slug)
+            continue
+
+        quoted: list[tuple[str, Position, float]] = []
+        pair_cost = 0.0
+        for _outcome, pos in legs.items():
+            bid, _ask = _leg_book(pos)
+            if bid is None:
+                continue
+            quoted.append((_outcome, pos, bid))
+            pair_cost += float(pos.avg_entry_price or 0) * float(pos.shares)
+        if len(quoted) < 2:
+            continue
+        bid_sum = quoted[0][2] + quoted[1][2]
+        shares = min(quoted[0][1].shares, quoted[1][1].shares)
+        cost_per_share = 0.0
+        if shares > 0:
+            cost_per_share = (quoted[0][1].avg_entry_price or 0) + (quoted[1][1].avg_entry_price or 0)
+        # Take both only when the book pays at least the lock (recycle capital).
+        # Otherwise hold to resolution ($1/share).
+        if hold_complete and bid_sum + 1e-9 < max(pair_exit, cost_per_share):
+            continue
+        if bid_sum + 1e-9 < cost_per_share:
+            continue
+        for outcome, pos, bid in quoted:
+            reason = (
+                f"arb pair exit {outcome} bid={bid:.3f} "
+                f"sum={bid_sum:.3f} cost={cost_per_share:.3f}"
+            )
+            sig = _sell(pos, pos.shares, reason=reason, bid=bid)
+            if sig:
+                signals.append(sig)
 
     return signals

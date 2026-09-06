@@ -1,8 +1,9 @@
-"""Persistent exit state for arbitrage pairs (ladder / lose-leg / rebalance)."""
+"""Persistent hedge/exit state for arbitrage pairs."""
 
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -16,10 +17,16 @@ class ArbPairState:
     ladder_levels_hit: dict[str, list[float]] = field(default_factory=dict)
     lose_leg_sold: bool = False
     last_mid: dict[str, float] = field(default_factory=dict)
+    first_outcome: str | None = None
+    second_outcome: str | None = None
+    first_leg_at: float | None = None
+    second_limit: float | None = None
+    target_shares: float | None = None
+    hedge_submitted: bool = False
 
 
 class ArbExitStore:
-    """Tracks active arb exits per condition_id."""
+    """Tracks sequential hedges and exit rungs per condition_id."""
 
     def __init__(self, data_dir: Path | str) -> None:
         root = Path(data_dir)
@@ -65,6 +72,12 @@ class ArbExitStore:
                 ladder_levels_hit=ladders,
                 lose_leg_sold=bool(row.get("lose_leg_sold")),
                 last_mid=last_mid,
+                first_outcome=str(row["first_outcome"]).lower() if row.get("first_outcome") else None,
+                second_outcome=str(row["second_outcome"]).lower() if row.get("second_outcome") else None,
+                first_leg_at=float(row["first_leg_at"]) if row.get("first_leg_at") is not None else None,
+                second_limit=float(row["second_limit"]) if row.get("second_limit") is not None else None,
+                target_shares=float(row["target_shares"]) if row.get("target_shares") is not None else None,
+                hedge_submitted=bool(row.get("hedge_submitted")),
             )
 
     def _save(self) -> None:
@@ -83,6 +96,39 @@ class ArbExitStore:
         else:
             state.market_slug = market_slug
         return state
+
+    def mark_first_leg(
+        self,
+        condition_id: str,
+        *,
+        market_slug: str,
+        first_outcome: str,
+        second_outcome: str,
+        second_limit: float,
+        target_shares: float,
+        at: float | None = None,
+    ) -> None:
+        state = self.ensure(condition_id, market_slug=market_slug)
+        state.first_outcome = first_outcome.lower()
+        state.second_outcome = second_outcome.lower()
+        state.second_limit = float(second_limit)
+        state.target_shares = float(target_shares)
+        state.first_leg_at = float(at if at is not None else time.time())
+        state.hedge_submitted = False
+        self._save()
+
+    def mark_hedge_submitted(self, condition_id: str, *, market_slug: str) -> None:
+        state = self.ensure(condition_id, market_slug=market_slug)
+        state.hedge_submitted = True
+        self._save()
+
+    def waiting_hedge(self, condition_id: str, *, now: float | None = None, delay: float = 120) -> bool:
+        state = self._states.get(condition_id)
+        if not state or state.first_leg_at is None:
+            return False
+        if state.hedge_submitted:
+            return False
+        return (now if now is not None else time.time()) - state.first_leg_at < delay
 
     def set_baseline(self, condition_id: str, outcome: str, shares: float, *, market_slug: str) -> None:
         state = self.ensure(condition_id, market_slug=market_slug)
@@ -141,13 +187,23 @@ class ArbExitStore:
         state.last_mid[outcome.lower()] = float(mid)
         self._save()
 
-    def prune_closed(self, positions: list[Position]) -> None:
+    def prune_closed(self, positions: list[Position], *, abort_seconds: float = 1800) -> None:
         open_ids = {
-            p.market_condition_id
+            p.market_condition_id or p.market_slug
             for p in positions
-            if p.shares > 0 and not p.is_resolved and p.market_condition_id
+            if p.shares > 0 and not p.is_resolved
         }
-        stale = [k for k in self._states if k not in open_ids]
+        now = time.time()
+        stale = []
+        for key, state in self._states.items():
+            if key in open_ids:
+                continue
+            if (
+                state.first_leg_at is not None
+                and (now - state.first_leg_at) < abort_seconds
+            ):
+                continue
+            stale.append(key)
         if not stale:
             return
         for key in stale:

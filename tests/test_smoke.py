@@ -43,7 +43,21 @@ def test_dashboard_index_renders():
     assert response.status_code == 200
     assert b"Arbot" in response.data
     assert b"Server time" in response.data
-    assert b"Times in server timezone" in response.data
+    assert b"CSV trades" in response.data
     health = client.get("/health")
     assert health.status_code == 200
     assert health.get_json()["ok"] is True
+
+
+def test_csv_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARBOT_DATA_DIR", str(tmp_path))
+    from arbot.dashboard.app import app
+
+    client = app.test_client()
+    activity = client.get("/api/export/activity.csv")
+    assert activity.status_code == 200
+    assert b"ts," in activity.data
+    trades = client.get("/api/export/trades.csv")
+    assert trades.status_code == 200
+    assert b"created_at" in trades.data
+
